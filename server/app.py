@@ -13,6 +13,7 @@ import json
 # Create FastAPI app
 app = FastAPI(title="Translation Validator API")
 
+DB_PATH = 'temp/translations.db'
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +25,7 @@ app.add_middleware(
 
 # Database connection helper
 def get_db():
-    db = sqlite3.connect('translations.db')
+    db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row  # This enables column access by name
     try:
         yield db
@@ -34,7 +35,7 @@ def get_db():
 # Initialize database
 def init_db():
     print("Initializing database...")
-    db = sqlite3.connect('translations.db')
+    db = sqlite3.connect(DB_PATH)
     cursor = db.cursor()
     
     # Create translations table
@@ -107,7 +108,7 @@ class CSVImport(BaseModel):
 @app.get("/api/translations", response_model=List[dict])
 async def get_translations():
     try:
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT * FROM translations')
@@ -119,7 +120,7 @@ async def get_translations():
 @app.get("/api/translations/random")
 async def get_random_translation():
     try:
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT * FROM translations WHERE status = ? ORDER BY RANDOM() LIMIT 1', ('pending',))
@@ -137,7 +138,7 @@ async def update_translation(
 ):
     try:
         # Check if translation exists
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT * FROM translations WHERE id = ?', (translation_id,))
@@ -181,7 +182,7 @@ async def update_translation(
 async def import_translations(csv_data: CSVImport):
     try:
         lines = csv_data.csvData.strip().split('\n')
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         now = datetime.now().isoformat()
@@ -212,7 +213,7 @@ async def import_translations(csv_data: CSVImport):
 @app.get("/api/translations/count")
 async def check_database_empty():
     try:
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT COUNT(*) as count FROM translations')
@@ -225,7 +226,7 @@ async def check_database_empty():
 @app.get("/api/translations/validated", response_model=List[dict])
 async def get_validated_translations():
     try:
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT * FROM translations WHERE status = ?', ('validated',))
@@ -237,7 +238,7 @@ async def get_validated_translations():
 @app.get("/api/translations/export")
 async def export_validated_translations():
     try:
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT * FROM translations WHERE status = ?', ('validated',))
@@ -269,7 +270,7 @@ async def export_validated_translations():
 @app.get("/api/users", response_model=List[dict])
 async def get_users():
     try:
-        db = sqlite3.connect('translations.db')
+        db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         cursor = db.cursor()
         cursor.execute('SELECT * FROM users')
