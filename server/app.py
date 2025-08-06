@@ -13,7 +13,7 @@ import json
 # Create FastAPI app
 app = FastAPI(title="Translation Validator API")
 
-DB_PATH = 'temp/translations.db'
+DB_PATH = '/temp/translations.db'
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
