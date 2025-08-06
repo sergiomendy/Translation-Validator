@@ -69,16 +69,8 @@ async def init_db():
         print(f"Failed to connect to MongoDB: {e}")
         raise
 
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    await init_db()
 
-# Shutdown event
-@app.on_event("shutdown")
-async def shutdown_event():
-    if client:
-        client.close()
+
 
 # Models
 class Translation(BaseModel):
