@@ -20,8 +20,8 @@ MONGODB_URL = "mongodb+srv://admin:admin@cluster0.n7jczep.mongodb.net/?retryWrit
 DATABASE_NAME = "translations_db"
 
 # MongoDB client
-client = None
-database = None
+client = AsyncIOMotorClient(MONGODB_URL)
+database = client[DATABASE_NAME]
 
 # Configure CORS
 app.add_middleware(
@@ -42,8 +42,6 @@ async def init_db():
     print("Initializing MongoDB connection...")
     
     try:
-        client = AsyncIOMotorClient(MONGODB_URL)
-        database = client[DATABASE_NAME]
         
         # Test connection
         await client.admin.command('ping')
