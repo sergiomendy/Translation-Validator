@@ -17,8 +17,8 @@ MONGODB_URL = "mongodb+srv://admin:admin@cluster0.n7jczep.mongodb.net/?retryWrit
 DATABASE_NAME = "translations_db"
 
 # MongoDB client
-client = None
-database = None
+client = AsyncIOMotorClient(MONGODB_URL)
+database = client[DATABASE_NAME]
 
 # Initialize database
 async def init_db():
