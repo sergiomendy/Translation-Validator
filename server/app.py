@@ -1,19 +1,28 @@
-from fastapi import FastAPI, HTTPException, Depends, Body, Response
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
-import sqlite3
 import csv
 import io
 import os
 from datetime import datetime
 import json
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
+import asyncio
 
 # Create FastAPI app
 app = FastAPI(title="Translation Validator API")
 
-DB_PATH = '/temp/translations.db'
+# MongoDB configuration
+MONGODB_URL = "mongodb+srv://admin:admin@cluster0.n7jczep.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+DATABASE_NAME = "translations_db"
+
+# MongoDB client
+client = None
+database = None
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -24,58 +33,58 @@ app.add_middleware(
 )
 
 # Database connection helper
-def get_db():
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row  # This enables column access by name
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_database():
+    return database
 
 # Initialize database
-def init_db():
-    print("Initializing database...")
-    db = sqlite3.connect(DB_PATH)
-    cursor = db.cursor()
+async def init_db():
+    global client, database
+    print("Initializing MongoDB connection...")
     
-    # Create translations table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS translations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        french TEXT NOT NULL,
-        wolof TEXT NOT NULL,
-        status TEXT DEFAULT 'pending',
-        validatedBy TEXT,
-        correctedBy TEXT,
-        hasBeenCorrected INTEGER DEFAULT 0,
-        originalWolof TEXT,
-        lastUpdated TEXT,
-        UNIQUE(french, wolof)
-    )
-    ''')
-    
-    # Create users table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE NOT NULL
-    )
-    ''')
-    
-    # Add default users
-    default_users = ['Alwaly', 'Serge', 'Matar']
-    for name in default_users:
-        cursor.execute('INSERT OR IGNORE INTO users (name) VALUES (?)', (name,))
-    
-    db.commit()
-    db.close()
+    try:
+        client = AsyncIOMotorClient(MONGODB_URL)
+        database = client[DATABASE_NAME]
+        
+        # Test connection
+        await client.admin.command('ping')
+        print("MongoDB connection successful!")
+        
+        # Create collections and indexes
+        translations_collection = database.translations
+        users_collection = database.users
+        
+        # Create unique index for translations (french + wolof combination)
+        await translations_collection.create_index([("french", 1), ("wolof", 1)], unique=True)
+        
+        # Create unique index for users
+        await users_collection.create_index("name", unique=True)
+        
+        # Add default users
+        default_users = ['Alwaly', 'Serge', 'Matar']
+        for name in default_users:
+            try:
+                await users_collection.insert_one({"name": name})
+            except DuplicateKeyError:
+                pass  # User already exists
+                
+    except Exception as e:
+        print(f"Failed to connect to MongoDB: {e}")
+        raise
 
-# Initialize database on startup
-init_db()
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    await init_db()
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown_event():
+    if client:
+        client.close()
 
 # Models
 class Translation(BaseModel):
-    id: Optional[int] = None
+    id: Optional[str] = None
     french: str
     wolof: str
     status: Optional[str] = "pending"
@@ -98,21 +107,33 @@ class TranslationUpdate(BaseModel):
     originalWolof: Optional[str] = None
 
 class User(BaseModel):
-    id: Optional[int] = None
+    id: Optional[str] = None
     name: str
 
 class CSVImport(BaseModel):
     csvData: str
 
+# Helper function to convert MongoDB document to dict
+def translation_helper(translation) -> dict:
+    if translation:
+        translation["id"] = str(translation["_id"])
+        del translation["_id"]
+    return translation
+
+def user_helper(user) -> dict:
+    if user:
+        user["id"] = str(user["_id"])
+        del user["_id"]
+    return user
+
 # Routes
 @app.get("/api/translations", response_model=List[dict])
 async def get_translations():
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT * FROM translations')
-        translations = [dict(row) for row in cursor.fetchall()]
+        db = await get_database()
+        translations = []
+        async for translation in db.translations.find():
+            translations.append(translation_helper(translation))
         return translations
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -120,29 +141,28 @@ async def get_translations():
 @app.get("/api/translations/random")
 async def get_random_translation():
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT * FROM translations WHERE status = ? ORDER BY RANDOM() LIMIT 1', ('pending',))
-        translation = cursor.fetchone()
-        if translation:
-            return dict(translation)
+        db = await get_database()
+        pipeline = [
+            {"$match": {"status": "pending"}},
+            {"$sample": {"size": 1}}
+        ]
+        async for translation in db.translations.aggregate(pipeline):
+            return translation_helper(translation)
         return None
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/translations/{translation_id}", response_model=dict)
 async def update_translation(
-    translation_id: int, 
+    translation_id: str, 
     updates: TranslationUpdate
 ):
     try:
+        from bson import ObjectId
+        
         # Check if translation exists
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT * FROM translations WHERE id = ?', (translation_id,))
-        existing = cursor.fetchone()
+        db = await get_database()
+        existing = await db.translations.find_one({"_id": ObjectId(translation_id)})
         
         if not existing:
             raise HTTPException(status_code=404, detail=f"Translation with ID {translation_id} not found")
@@ -155,37 +175,29 @@ async def update_translation(
         # Add lastUpdated timestamp
         update_dict['lastUpdated'] = datetime.now().isoformat()
         
-        # Build the SQL query
-        fields = []
-        values = []
-        for key, value in update_dict.items():
-            fields.append(f"{key} = ?")
-            values.append(value)
-        
-        # Add ID for WHERE clause
-        values.append(translation_id)
-        
         # Execute update
-        query = f"UPDATE translations SET {', '.join(fields)} WHERE id = ?"
-        cursor.execute(query, values)
-        db.commit()
+        result = await db.translations.update_one(
+            {"_id": ObjectId(translation_id)},
+            {"$set": update_dict}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=500, detail="Failed to update translation")
         
         # Return updated translation
-        cursor.execute('SELECT * FROM translations WHERE id = ?', (translation_id,))
-        updated = cursor.fetchone()
-        return dict(updated)
+        updated = await db.translations.find_one({"_id": ObjectId(translation_id)})
+        return translation_helper(updated)
     except Exception as e:
-        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/translations/import")
 async def import_translations(csv_data: CSVImport):
     try:
         lines = csv_data.csvData.strip().split('\n')
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
+        db = await get_database()
         now = datetime.now().isoformat()
+        
+        translations_to_insert = []
         
         for i, line in enumerate(lines):
             if i == 0 or not line:  # Skip header row and empty lines
@@ -199,26 +211,33 @@ async def import_translations(csv_data: CSVImport):
                 french = parts[1].strip()
                 
                 if french and wolof:
-                    cursor.execute(
-                        'INSERT OR IGNORE INTO translations (wolof, french, status, originalWolof, lastUpdated) VALUES (?, ?, ?, ?, ?)',
-                        (wolof, french, 'pending', wolof, now)
-                    )
+                    translation_doc = {
+                        "wolof": wolof,
+                        "french": french,
+                        "status": "pending",
+                        "originalWolof": wolof,
+                        "lastUpdated": now,
+                        "hasBeenCorrected": 0
+                    }
+                    translations_to_insert.append(translation_doc)
         
-        db.commit()
+        # Insert all translations, ignore duplicates
+        if translations_to_insert:
+            try:
+                await db.translations.insert_many(translations_to_insert, ordered=False)
+            except Exception as e:
+                # Some duplicates might be expected, so we don't fail completely
+                print(f"Some translations might have been duplicates: {e}")
+        
         return {"success": True, "message": "Import successful"}
     except Exception as e:
-        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/translations/count")
 async def check_database_empty():
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT COUNT(*) as count FROM translations')
-        result = cursor.fetchone()
-        count = result['count']
+        db = await get_database()
+        count = await db.translations.count_documents({})
         return {"isEmpty": count == 0, "count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -226,11 +245,10 @@ async def check_database_empty():
 @app.get("/api/translations/validated", response_model=List[dict])
 async def get_validated_translations():
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT * FROM translations WHERE status = ?', ('validated',))
-        translations = [dict(row) for row in cursor.fetchall()]
+        db = await get_database()
+        translations = []
+        async for translation in db.translations.find({"status": "validated"}):
+            translations.append(translation_helper(translation))
         return translations
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -238,11 +256,10 @@ async def get_validated_translations():
 @app.get("/api/translations/export")
 async def export_validated_translations():
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT * FROM translations WHERE status = ?', ('validated',))
-        translations = cursor.fetchall()
+        db = await get_database()
+        translations = []
+        async for translation in db.translations.find({"status": "validated"}):
+            translations.append(translation)
         
         # Create CSV content
         output = io.StringIO()
@@ -251,12 +268,12 @@ async def export_validated_translations():
         
         for translation in translations:
             writer.writerow([
-                translation['wolof'],
-                translation['french'],
-                translation['status'],
-                translation['validatedBy'] or '',
-                translation['correctedBy'] or '',
-                translation['lastUpdated']
+                translation.get('wolof', ''),
+                translation.get('french', ''),
+                translation.get('status', ''),
+                translation.get('validatedBy', ''),
+                translation.get('correctedBy', ''),
+                translation.get('lastUpdated', '')
             ])
         
         # Prepare response
@@ -270,11 +287,10 @@ async def export_validated_translations():
 @app.get("/api/users", response_model=List[dict])
 async def get_users():
     try:
-        db = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-        cursor = db.cursor()
-        cursor.execute('SELECT * FROM users')
-        users = [dict(row) for row in cursor.fetchall()]
+        db = await get_database()
+        users = []
+        async for user in db.users.find():
+            users.append(user_helper(user))
         return users
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
