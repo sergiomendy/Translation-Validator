@@ -10,31 +10,15 @@ from datetime import datetime
 import json
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
-import asyncio
-
-# Create FastAPI app
-app = FastAPI(title="Translation Validator API")
+from contextlib import asynccontextmanager
 
 # MongoDB configuration
 MONGODB_URL = "mongodb+srv://admin:admin@cluster0.n7jczep.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DATABASE_NAME = "translations_db"
 
 # MongoDB client
-client = AsyncIOMotorClient(MONGODB_URL)
-database = client[DATABASE_NAME]
-
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Allow all origins in development
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Database connection helper
-async def get_database():
-    return database
+client = None
+database = None
 
 # Initialize database
 async def init_db():
@@ -42,6 +26,8 @@ async def init_db():
     print("Initializing MongoDB connection...")
     
     try:
+        client = AsyncIOMotorClient(MONGODB_URL)
+        database = client[DATABASE_NAME]
         
         # Test connection
         await client.admin.command('ping')
@@ -52,10 +38,16 @@ async def init_db():
         users_collection = database.users
         
         # Create unique index for translations (french + wolof combination)
-        await translations_collection.create_index([("french", 1), ("wolof", 1)], unique=True)
+        try:
+            await translations_collection.create_index([("french", 1), ("wolof", 1)], unique=True)
+        except Exception:
+            pass  # Index might already exist
         
         # Create unique index for users
-        await users_collection.create_index("name", unique=True)
+        try:
+            await users_collection.create_index("name", unique=True)
+        except Exception:
+            pass  # Index might already exist
         
         # Add default users
         default_users = ['Alwaly', 'Serge', 'Matar']
@@ -69,8 +61,34 @@ async def init_db():
         print(f"Failed to connect to MongoDB: {e}")
         raise
 
+async def close_db():
+    global client
+    if client:
+        client.close()
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await init_db()
+    yield
+    # Shutdown
+    await close_db()
 
+# Create FastAPI app with lifespan
+app = FastAPI(title="Translation Validator API", lifespan=lifespan)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # Allow all origins in development
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database connection helper
+async def get_database():
+    return database
 
 # Models
 class Translation(BaseModel):
@@ -149,10 +167,17 @@ async def update_translation(
 ):
     try:
         from bson import ObjectId
+        from bson.errors import InvalidId
+        
+        # Validate ObjectId format
+        try:
+            obj_id = ObjectId(translation_id)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid translation ID format")
         
         # Check if translation exists
         db = await get_database()
-        existing = await db.translations.find_one({"_id": ObjectId(translation_id)})
+        existing = await db.translations.find_one({"_id": obj_id})
         
         if not existing:
             raise HTTPException(status_code=404, detail=f"Translation with ID {translation_id} not found")
@@ -167,7 +192,7 @@ async def update_translation(
         
         # Execute update
         result = await db.translations.update_one(
-            {"_id": ObjectId(translation_id)},
+            {"_id": obj_id},
             {"$set": update_dict}
         )
         
@@ -175,8 +200,10 @@ async def update_translation(
             raise HTTPException(status_code=500, detail="Failed to update translation")
         
         # Return updated translation
-        updated = await db.translations.find_one({"_id": ObjectId(translation_id)})
+        updated = await db.translations.find_one({"_id": obj_id})
         return translation_helper(updated)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -207,20 +234,28 @@ async def import_translations(csv_data: CSVImport):
                         "status": "pending",
                         "originalWolof": wolof,
                         "lastUpdated": now,
-                        "hasBeenCorrected": 0
+                        "hasBeenCorrected": 0,
+                        "validatedBy": None,
+                        "correctedBy": None
                     }
                     translations_to_insert.append(translation_doc)
         
         # Insert all translations, ignore duplicates
         if translations_to_insert:
-            try:
-                await db.translations.insert_many(translations_to_insert, ordered=False)
-            except Exception as e:
-                # Some duplicates might be expected, so we don't fail completely
-                print(f"Some translations might have been duplicates: {e}")
+            inserted_count = 0
+            for translation in translations_to_insert:
+                try:
+                    await db.translations.insert_one(translation)
+                    inserted_count += 1
+                except DuplicateKeyError:
+                    # Ignore duplicates
+                    pass
+            
+            print(f"Inserted {inserted_count} new translations")
         
         return {"success": True, "message": "Import successful"}
     except Exception as e:
+        print(f"Import error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/translations/count")
