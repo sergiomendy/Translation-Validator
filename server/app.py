@@ -27,7 +27,7 @@ database = client[DATABASE_NAME]
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173","https://translation-validator.vercel.app"],  # Allow all origins in development
+    allow_origins=["http://localhost:5173", "https://translation-validator.vercel.app"],  # Allow specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,6 +55,12 @@ def init_db():
             translations_collection.create_index([("french", 1), ("wolof", 1)], unique=True)
         except Exception:
             pass  # Index might already exist
+        
+        # Create index for status queries
+        try:
+            translations_collection.create_index("status")
+        except Exception:
+            pass
         
         # Create unique index for users
         try:
@@ -221,31 +227,28 @@ def import_translations(csv_data: CSVImport):
             if i == 0 or not line:  # Skip header row and empty lines
                 continue
             
-            parts = line.split('|')
-            if len(parts) >= 2:
-                # Columns are Wolof,French
-                wolof = parts[0].strip()
-                # Join remaining parts as French (in case it contains commas)
-                french = parts[1].strip()
+            
+            wolof = line.strip('"').strip()
+            french = ""
+            
+            if wolof:  # Insert if we have at least Wolof text
+                translation_doc = {
+                    "wolof": wolof,
+                    "french": french,
+                    "status": "pending",
+                    "originalWolof": wolof,
+                    "lastUpdated": now,
+                    "hasBeenCorrected": 0,
+                    "validatedBy": None,
+                    "correctedBy": None
+                }
                 
-                if french and wolof:
-                    translation_doc = {
-                        "wolof": wolof,
-                        "french": french,
-                        "status": "pending",
-                        "originalWolof": wolof,
-                        "lastUpdated": now,
-                        "hasBeenCorrected": 0,
-                        "validatedBy": None,
-                        "correctedBy": None
-                    }
-                    
-                    try:
-                        db.translations.insert_one(translation_doc)
-                        inserted_count += 1
-                    except DuplicateKeyError:
-                        # Ignore duplicates
-                        pass
+                try:
+                    db.translations.insert_one(translation_doc)
+                    inserted_count += 1
+                except DuplicateKeyError:
+                    # Ignore duplicates
+                    pass
         
         print(f"Inserted {inserted_count} new translations")
         return {"success": True, "message": f"Import successful. Inserted {inserted_count} new translations."}
@@ -312,3 +315,147 @@ def get_users():
         return users
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Additional useful routes
+
+@app.post("/api/translations", response_model=dict)
+def create_translation(translation: Translation):
+    try:
+        db = get_database()
+        translation_dict = translation.dict(exclude={"id"})
+        translation_dict["lastUpdated"] = datetime.now().isoformat()
+        
+        # Set originalWolof if not provided
+        if not translation_dict.get("originalWolof"):
+            translation_dict["originalWolof"] = translation_dict["wolof"]
+        
+        result = db.translations.insert_one(translation_dict)
+        created = db.translations.find_one({"_id": result.inserted_id})
+        return translation_helper(created)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="Translation already exists")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/translations/{translation_id}")
+def delete_translation(translation_id: str):
+    try:
+        try:
+            obj_id = ObjectId(translation_id)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid translation ID format")
+        
+        db = get_database()
+        result = db.translations.delete_one({"_id": obj_id})
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail=f"Translation with ID {translation_id} not found")
+        
+        return {"success": True, "message": "Translation deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/statistics")
+def get_statistics():
+    try:
+        db = get_database()
+        
+        # Get counts for each status
+        pipeline = [
+            {
+                "$group": {
+                    "_id": "$status",
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+        
+        status_counts = list(db.translations.aggregate(pipeline))
+        
+        # Get total count
+        total = db.translations.count_documents({})
+        
+        # Get user statistics
+        user_pipeline = [
+            {"$match": {"validatedBy": {"$ne": None}}},
+            {
+                "$group": {
+                    "_id": "$validatedBy",
+                    "validated": {"$sum": 1}
+                }
+            }
+        ]
+        
+        user_stats = list(db.translations.aggregate(user_pipeline))
+        
+        # Get correction statistics
+        correction_pipeline = [
+            {"$match": {"correctedBy": {"$ne": None}}},
+            {
+                "$group": {
+                    "_id": "$correctedBy",
+                    "corrected": {"$sum": 1}
+                }
+            }
+        ]
+        
+        correction_stats = list(db.translations.aggregate(correction_pipeline))
+        
+        statistics = {
+            "total": total,
+            "pending": 0,
+            "validated": 0,
+            "rejected": 0,
+            "userStats": {},
+            "correctionStats": {}
+        }
+        
+        for status in status_counts:
+            if status["_id"] in ["pending", "validated", "rejected"]:
+                statistics[status["_id"]] = status["count"]
+        
+        for user in user_stats:
+            if user["_id"]:
+                statistics["userStats"][user["_id"]] = user["validated"]
+        
+        for user in correction_stats:
+            if user["_id"]:
+                statistics["correctionStats"][user["_id"]] = user["corrected"]
+        
+        return statistics
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/users", response_model=dict)
+def create_user(user: User):
+    try:
+        db = get_database()
+        user_dict = {"name": user.name}
+        
+        result = db.users.insert_one(user_dict)
+        created = db.users.find_one({"_id": result.inserted_id})
+        return user_helper(created)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="User already exists")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Health check endpoint
+@app.get("/api/health")
+def health_check():
+    try:
+        # Test database connection
+        client.admin.command('ping')
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
+
+# For serving React app in production
+@app.get("/{full_path:path}")
+async def serve_react_app(full_path: str):
+    # Serve the index.html for any path not matching API routes
+    if os.path.exists(f"../dist/{full_path}"):
+        return FileResponse(f"../dist/{full_path}")
+    return FileResponse("../dist/index.html")
