@@ -451,11 +451,3 @@ def health_check():
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
-
-# For serving React app in production
-@app.get("/{full_path:path}")
-async def serve_react_app(full_path: str):
-    # Serve the index.html for any path not matching API routes
-    if os.path.exists(f"../dist/{full_path}"):
-        return FileResponse(f"../dist/{full_path}")
-    return FileResponse("../dist/index.html")
