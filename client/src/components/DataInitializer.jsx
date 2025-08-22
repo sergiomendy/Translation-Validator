@@ -14,10 +14,7 @@ function DataInitializer({ onInitialized }) {
           const response = await fetch('/data/translations.csv');
           let csvData = await response.text();
           
-          // Check and update header if needed (for backward compatibility)
-          if (csvData.startsWith('French,Wolof')) {
-            csvData = 'Wolof,French' + csvData.substring('French,Wolof'.length);
-          }
+          // No header conversion needed - CSV now only has Wolof column
           
           // Import the data into the database
           await importTranslationsFromCSV(csvData);

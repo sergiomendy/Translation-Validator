@@ -8,9 +8,9 @@ import {
 
 function TranslationValidator({ username, onLogout }) {
   const [currentTranslation, setCurrentTranslation] = useState(null);
-  const [editedTranslation, setEditedTranslation] = useState('');
+  const [frenchText, setFrenchText] = useState('');
   const [isLoading, setIsLoading] = useState(true);
-  const [stats, setStats] = useState({ total: 0, pending: 0, validated: 0, corrected: 0 });
+  const [stats, setStats] = useState({ total: 0, pending: 0, validated: 0 });
   const [message, setMessage] = useState('');
   
   // Load a random pending translation
@@ -20,7 +20,7 @@ function TranslationValidator({ username, onLogout }) {
       const translation = await getRandomPendingTranslation();
       setCurrentTranslation(translation);
       if (translation) {
-        setEditedTranslation(translation.wolof);
+        setFrenchText(translation.french || '');
       }
     } catch (error) {
       console.error('Error loading translation:', error);
@@ -36,8 +36,7 @@ function TranslationValidator({ username, onLogout }) {
       setStats({
         total: translations.length,
         pending: translations.filter(t => t.status === 'pending').length,
-        validated: translations.filter(t => t.status === 'validated').length,
-        corrected: translations.filter(t => t.status === 'corrected').length
+        validated: translations.filter(t => t.status === 'validated').length
       });
     } catch (error) {
       console.error('Error updating stats:', error);
@@ -46,10 +45,14 @@ function TranslationValidator({ username, onLogout }) {
   
   // Handle validation
   const handleValidate = async () => {
-    if (!currentTranslation) return;
+    if (!currentTranslation || !frenchText.trim()) {
+      alert('Veuillez entrer une traduction en français');
+      return;
+    }
     
     try {
       await updateTranslation(currentTranslation.id, {
+        french: frenchText.trim(),
         status: 'validated',
         validatedBy: username
       });
@@ -60,32 +63,16 @@ function TranslationValidator({ username, onLogout }) {
       // Load next translation and update stats
       await updateStats();
       await loadRandomTranslation();
+      setFrenchText('');
     } catch (error) {
       console.error('Error validating translation:', error);
     }
   };
   
-  // Handle correction
-  const handleCorrect = async () => {
-    if (!currentTranslation || editedTranslation === currentTranslation.wolof) return;
-    
-    try {
-      await updateTranslation(currentTranslation.id, {
-        wolof: editedTranslation,
-        status: 'pending', // Reset to pending so it can be validated later
-        correctedBy: username, // Track who corrected it
-        hasBeenCorrected: true // Flag to indicate this was corrected
-      });
-      
-      setMessage('Traduction corrigée et remise en attente pour validation !');
-      setTimeout(() => setMessage(''), 3000);
-      
-      // Load next translation and update stats
-      await updateStats();
-      await loadRandomTranslation();
-    } catch (error) {
-      console.error('Error correcting translation:', error);
-    }
+  // Skip current translation
+  const handleSkip = async () => {
+    await loadRandomTranslation();
+    setFrenchText('');
   };
   
   // Export validated translations
@@ -125,7 +112,7 @@ function TranslationValidator({ username, onLogout }) {
       {/* Header */}
       <header className="bg-white shadow">
         <div className="max-w-5xl mx-auto px-4 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-gray-800">Validateur de Traductions</h1>
+          <h1 className="text-2xl font-bold text-gray-800">Validateur de Traductions Français-Wolof</h1>
           <div className="flex items-center space-x-4">
             <span className="text-gray-600">Connecté en tant que: <span className="font-semibold">{username}</span></span>
             <button
@@ -142,7 +129,7 @@ function TranslationValidator({ username, onLogout }) {
       <main className="flex-grow max-w-5xl mx-auto w-full px-4 py-8">
         {/* Stats bar */}
         <div className="bg-white rounded-lg shadow mb-8 p-4">
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-3 gap-4">
             <div className="text-center">
               <div className="text-xl font-bold">{stats.total}</div>
               <div className="text-sm text-gray-500">Total</div>
@@ -154,10 +141,6 @@ function TranslationValidator({ username, onLogout }) {
             <div className="text-center">
               <div className="text-xl font-bold">{stats.validated}</div>
               <div className="text-sm text-gray-500">Validées</div>
-            </div>
-            <div className="text-center">
-              <div className="text-xl font-bold">{stats.corrected}</div>
-              <div className="text-sm text-gray-500">Corrigées</div>
             </div>
           </div>
         </div>
@@ -190,44 +173,44 @@ function TranslationValidator({ username, onLogout }) {
         ) : (
           <div className="bg-white rounded-lg shadow p-6">
             <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Français</label>
-              <div className="p-4 bg-gray-50 rounded-md text-lg">{currentTranslation.french}</div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Phrase en Wolof à traduire:
+              </label>
+              <div className="p-4 bg-blue-50 rounded-md text-lg font-medium text-blue-900 border border-blue-200">
+                {currentTranslation.wolof}
+              </div>
             </div>
             
             <div className="mb-6">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Traduction Wolof</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Votre traduction en français:
+              </label>
               <textarea
-                value={editedTranslation}
-                onChange={(e) => setEditedTranslation(e.target.value)}
+                value={frenchText}
+                onChange={(e) => setFrenchText(e.target.value)}
                 className="w-full p-4 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg"
                 rows="3"
+                placeholder="Entrez votre traduction française ici..."
               />
             </div>
             
             <div className="flex space-x-4">
               <button
                 onClick={handleValidate}
-                disabled={!currentTranslation}
-                className="flex-1 py-2.5 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
-              >
-                Valider
-              </button>
-              <button
-                onClick={handleCorrect}
-                disabled={!currentTranslation || editedTranslation === currentTranslation.wolof}
-                className={`flex-1 py-2.5 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500 ${
-                  editedTranslation !== currentTranslation.wolof
-                    ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                disabled={!frenchText.trim()}
+                className={`flex-1 py-3 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500 ${
+                  frenchText.trim()
+                    ? 'bg-green-600 text-white hover:bg-green-700'
                     : 'bg-gray-200 text-gray-500 cursor-not-allowed'
                 }`}
               >
-                Corriger & Sauvegarder
+                ✓ Valider cette traduction
               </button>
               <button
-                onClick={loadRandomTranslation}
-                className="flex-1 py-2.5 bg-gray-600 text-white rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                onClick={handleSkip}
+                className="flex-1 py-3 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-yellow-500"
               >
-                Suivant
+                ⏭ Passer au suivant
               </button>
             </div>
           </div>
@@ -239,7 +222,7 @@ function TranslationValidator({ username, onLogout }) {
             onClick={handleExport}
             className="px-6 py-2.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
-            Exporter les traductions validées
+            📥 Exporter les traductions validées
           </button>
         </div>
       </main>
