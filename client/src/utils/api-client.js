@@ -1,6 +1,6 @@
 // API client for communicating with the backend server
 
-const API_BASE_URL = 'http://localhost:8000/api';
+const API_BASE_URL = 'https://translation-validator-qauy.vercel.app/api';
 
 // Generic API call function with error handling
 const apiCall = async (endpoint, method = 'GET', data = null) => {
